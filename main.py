@@ -5,11 +5,11 @@ import sys
 
 import anthropic
 
-# --- Configuration ---
-# Update these to match your CSV file before running.
-FEEDBACK_FILE = "feedback.csv"   # Path to your CSV
-FEEDBACK_COLUMN = "feedback"     # Name of the column containing the feedback text
-MAX_ITEMS = 500                  # Cap to avoid hitting token limits on large files
+# Maximum number of feedback items to send. Keeps token costs manageable.
+MAX_ITEMS = 500
+
+# How many stripped items to show during the dry-run preview.
+PREVIEW_COUNT = 5
 
 
 # --- PII Stripping ---
@@ -44,9 +44,8 @@ def load_feedback(filepath, column):
         for i, row in enumerate(reader):
             # Check column exists on the first row
             if i == 0 and column not in row:
-                print(f"Error: Column '{column}' not found in {filepath}.")
+                print(f"\nError: Column '{column}' not found.")
                 print(f"Available columns: {list(row.keys())}")
-                print("Update FEEDBACK_COLUMN at the top of this script.")
                 sys.exit(1)
             text = row.get(column, "").strip()
             if text:
@@ -56,16 +55,24 @@ def load_feedback(filepath, column):
 
 # --- Analyze with Claude ---
 
-def analyze_feedback(items):
+def analyze_feedback(items, products=None):
     """Send PII-stripped feedback to Claude and return the analysis as a string."""
     client = anthropic.Anthropic()
 
-    # Number each item so Claude can reference them and count frequencies
-    numbered = "\n".join(f"{i + 1}. {item}" for i, item in enumerate(items))
+    # Build the numbered list, optionally prefixing each item with product type
+    if products:
+        numbered = "\n".join(
+            f"{i + 1}. [{products[i]}] {item}" for i, item in enumerate(items)
+        )
+        product_note = "Each item is prefixed with [Product Type] in brackets."
+    else:
+        numbered = "\n".join(f"{i + 1}. {item}" for i, item in enumerate(items))
+        product_note = ""
 
     prompt = f"""You are analyzing customer feedback to surface product insights.
 
 The feedback below has already had PII removed. There are {len(items)} items total.
+{product_note}
 
 FEEDBACK:
 {numbered}
@@ -76,6 +83,7 @@ Please analyze this and return:
    For each theme:
    - Theme name (short, descriptive)
    - Product area it relates to (if identifiable from the feedback)
+   - Which product types are most affected (if product type data is available)
    - Frequency: approximate % of the {len(items)} items that relate to this theme
    - Sentiment score: 1 (very negative) to 5 (very positive)
    - 2-3 representative quotes, verbatim from the feedback above (max 20 words each)
@@ -113,25 +121,55 @@ def main():
         print("Set it with: export ANTHROPIC_API_KEY=your-key-here")
         sys.exit(1)
 
-    # Fail early if the CSV doesn't exist
-    if not os.path.exists(FEEDBACK_FILE):
-        print(f"Error: '{FEEDBACK_FILE}' not found.")
-        print("Update FEEDBACK_FILE at the top of this script to point to your CSV.")
+    print("Feedback Analyzer")
+    print("=" * 60)
+
+    # Ask for the CSV file path
+    feedback_file = input("\nPath to your CSV file: ").strip()
+    if not os.path.exists(feedback_file):
+        print(f"Error: '{feedback_file}' not found. Check the path and try again.")
         sys.exit(1)
 
-    print(f"Loading feedback from {FEEDBACK_FILE}...")
-    items = load_feedback(FEEDBACK_FILE, FEEDBACK_COLUMN)
+    # Ask for the column name
+    feedback_column = input("Column name containing feedback text: ").strip()
+
+    # Ask for an optional product type column
+    product_column_input = input("Column name for product type (press Enter to skip): ").strip()
+    product_column = product_column_input if product_column_input else None
+
+    # Load and validate
+    print(f"\nLoading feedback...")
+    items = load_feedback(feedback_file, feedback_column)
+    products = load_feedback(feedback_file, product_column) if product_column else []
     print(f"Found {len(items)} feedback items.")
 
     if len(items) > MAX_ITEMS:
         print(f"Note: Capping at {MAX_ITEMS} items to stay within token limits.")
         items = items[:MAX_ITEMS]
+        if products:
+            products = products[:MAX_ITEMS]
 
+    # Strip PII locally before anything goes to Claude
     print("Stripping PII...")
     stripped = [strip_pii(item) for item in items]
 
-    print("Sending to Claude for analysis (this may take 30-60 seconds)...")
-    report = analyze_feedback(stripped)
+    # Show a preview so the user can verify PII was removed correctly
+    preview_count = min(PREVIEW_COUNT, len(stripped))
+    print(f"\n--- STRIPPED PREVIEW ({preview_count} of {len(stripped)} items) ---")
+    for i, item in enumerate(stripped[:preview_count]):
+        prefix = f"[{products[i]}] " if products else ""
+        print(f"{i + 1}. {prefix}{item}")
+    print("---")
+    print("\nCheck the preview above. PII should appear as [EMAIL], [PHONE], etc.")
+    print("Note: names are not automatically detected and may still be present.")
+
+    confirm = input("\nDoes the stripping look correct? Send to Claude for analysis? [y/n]: ").strip().lower()
+    if confirm != "y":
+        print("Aborted. No data was sent to Claude.")
+        sys.exit(0)
+
+    print("\nSending to Claude for analysis (this may take 30-60 seconds)...")
+    report = analyze_feedback(stripped, products or None)
 
     # Print to console
     print("\n" + "=" * 60)
@@ -139,14 +177,15 @@ def main():
     print("=" * 60)
 
     # Save report to file
-    output_file = "feedback_report.txt"
+    output_file = "feedback_report.md"
     with open(output_file, "w", encoding="utf-8") as f:
-        f.write("Feedback Analysis Report\n")
-        f.write(f"Source: {FEEDBACK_FILE} ({len(stripped)} items analyzed)\n")
-        f.write("=" * 60 + "\n\n")
+        f.write("# Feedback Analysis Report\n\n")
+        f.write(f"**Source:** {feedback_file}  \n")
+        f.write(f"**Items analyzed:** {len(stripped)}\n\n")
+        f.write("---\n\n")
         f.write(report)
 
-    print(f"\nReport saved to {output_file}")
+    print(f"\nReport saved to {output_file} — drag it into Claude Code to explore further.")
 
 
 if __name__ == "__main__":

@@ -214,3 +214,8 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Report outputs — contain customer feedback data, never commit
+feedback_report.md
+feedback_report.txt
+
